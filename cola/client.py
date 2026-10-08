@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import time
 from pathlib import Path
 from threading import Lock
@@ -23,6 +24,8 @@ class OpenAIChatClient:
         base_url: str | None = None,
         timeout: float | None = None,
         env_file: str | Path | None = None,
+        max_retries: int | None = None,
+        retry_backoff_seconds: float | None = None,
     ) -> None:
         _load_local_dotenv(env_file)
         key = api_key or os.getenv("OPENAI_API_KEY")
@@ -47,21 +50,35 @@ class OpenAIChatClient:
             timeout_value = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "60"))
         self.reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT") or None
         self.max_completion_tokens = _optional_int("OPENAI_MAX_COMPLETION_TOKENS")
-        max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "0"))
+        configured_retries = int(os.getenv("OPENAI_MAX_RETRIES", "0"))
+        self.max_retries = configured_retries if max_retries is None else max_retries
+        # The runner supplies its own retry loop; avoid silently multiplying retries.
+        sdk_max_retries = configured_retries if max_retries is None else 0
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        self.retry_backoff_seconds = (
+            float(os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", "1.0"))
+            if retry_backoff_seconds is None
+            else retry_backoff_seconds
+        )
+        if self.retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must be non-negative")
         self.calls: list[dict] = []
         self._lock = Lock()
         self._client = OpenAI(
             api_key=key,
             base_url=endpoint,
             timeout=timeout_value,
-            max_retries=max_retries,
+            max_retries=sdk_max_retries,
         )
         self.settings = {
             "model": self.model,
             "base_url": str(self._client.base_url),
             "temperature": 0,
             "timeout_seconds": timeout_value,
-            "max_retries": max_retries,
+            "max_retries": self.max_retries,
+            "sdk_max_retries": sdk_max_retries,
+            "retry_backoff_seconds": self.retry_backoff_seconds,
             "reasoning_effort": self.reasoning_effort,
             "max_completion_tokens": self.max_completion_tokens,
         }
@@ -81,30 +98,54 @@ class OpenAIChatClient:
             token_key = "max_tokens" if self._is_dashscope else "max_completion_tokens"
             request[token_key] = self.max_completion_tokens
         started = time.perf_counter()
-        record = {"system": system, "user": user}
+        record = {"system": system, "user": user, "attempts": 0}
         try:
-            response = self._client.chat.completions.create(**request)
-            choice = response.choices[0]
-            content = choice.message.content
-            record.update(
-                status="ok", content=content, finish_reason=choice.finish_reason,
-                returned_model=response.model,
-                usage=response.usage.model_dump() if response.usage else None,
-            )
-            if choice.finish_reason == "length":
-                raise RuntimeError("Completion truncated; increase or remove the token cap.")
-            if not content:
-                raise RuntimeError("The model returned an empty completion.")
-            return content.strip()
-        except Exception as exc:
-            # API exception bodies can contain credentials; persist only safe metadata.
-            record.update(status="error", error_type=type(exc).__name__,
-                          http_status=getattr(exc, "status_code", None))
-            raise
+            for attempt in range(self.max_retries + 1):
+                record["attempts"] = attempt + 1
+                try:
+                    response = self._client.chat.completions.create(**request)
+                    choice = response.choices[0]
+                    content = choice.message.content
+                    if choice.finish_reason == "length":
+                        raise RuntimeError("Completion truncated; increase or remove the token cap.")
+                    if not content:
+                        raise RuntimeError("The model returned an empty completion.")
+                    record.update(
+                        status="ok", content=content, finish_reason=choice.finish_reason,
+                        returned_model=response.model,
+                        usage=response.usage.model_dump() if response.usage else None,
+                    )
+                    return content.strip()
+                except Exception as exc:
+                    record.update(
+                        status="error", error_type=type(exc).__name__,
+                        http_status=getattr(exc, "status_code", None),
+                    )
+                    if attempt >= self.max_retries or not is_retryable_error(exc):
+                        raise
+                    delay = min(self.retry_backoff_seconds * (2 ** attempt), 30.0)
+                    time.sleep(random.uniform(0, delay))
         finally:
             record["elapsed_s"] = round(time.perf_counter() - started, 4)
             with self._lock:
                 self.calls.append(record)
+
+
+def is_retryable_error(exc: BaseException) -> bool:
+    """Return whether an exception is likely to be fixed by retrying the request."""
+    status = getattr(exc, "status_code", None)
+    if status in {408, 409, 425, 429} or (
+        isinstance(status, int) and status >= 500
+    ):
+        return True
+    return type(exc).__name__ in {
+        "APIConnectionError",
+        "APITimeoutError",
+        "ConnectError",
+        "ConnectionError",
+        "ReadTimeout",
+        "TimeoutError",
+    }
 
 
 def _optional_int(name: str) -> int | None:

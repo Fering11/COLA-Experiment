@@ -8,8 +8,11 @@
 - `data/dev15.csv`：15 条从训练镜像抽取的开发样本，仅用于开发验证；不能当作 SEM16 官方测试集。
 - `cola/`：数据读取、指标、API 客户端和 COLA 流程。
 - `run.py`：唯一实验入口。
+- `run()` 接收显式关键字参数，可直接从其他 Python 代码调用，不需要构造 `argparse.Namespace`。
+- 默认数据集为 `data/sem16_train.csv`；可用 `--csv` 指定其他 CSV。
 - `results/`：运行后保存逐样本记录和汇总；每行立即落盘。
 - `docs/experiment-protocol.md`：复现范围、协议差异和数据边界。
+- `docs/concurrency-benchmark.md`：基于当前 `.dp.env` 的并发实测结果。
 - `docs/dataset-sources.md`：SEM16、VAST、P-Stance 下载来源与许可边界。
 - `scripts/download_datasets.ps1`：下载 SEM16 训练集并抓取 VAST 项目快照。
 - `scripts/prepare_sem16.py`：把 SemEval 原始 TSV 转换为可直接评估的 CSV。
@@ -41,6 +44,20 @@
 .\.venv\Scripts\python.exe run.py --mock --method cola --csv data\dev15.csv --output results\dev15-mock.jsonl
 ```
 
+代码中直接调用：
+
+```python
+from run import run
+
+run(
+    csv="data/sem16_train.csv",
+    method="cola",
+    workers=2,
+    env_file=".dp.env",
+    output="results/sem16.jsonl",
+)
+```
+
 ## 接入 Qwen 或其他提供商
 
 复制 `configs/qwen.env.example` 为本地配置，填写 API key。也可以直接复用上级研究目录中已有的 `qwen.env`（不会复制或显示其中的密钥）：
@@ -65,5 +82,9 @@
 ```powershell
 .\.venv\Scripts\python.exe run.py --method cola --csv data\dev15.csv --repeats 5 --env-file ..\COLA-Research\qwen.env --output results\dev15-five-runs.jsonl
 ```
+
+运行时会在终端显示已完成样本数。默认外层并发为 2；完整 COLA pipeline 内部已经有三路分析和三路辩论并行。联网压测中，`.dp.env` 的端点在 4 条样本上表现为：2 worker 成功 4/4、约 127 秒；4 worker 成功 3/4、约 108 秒，因此默认采用 2，优先保证稳定性。可用 `--workers` 覆盖。
+
+网络请求默认最多重试 2 次，单条样本对瞬时错误额外重试 1 次；失败样本仍会写入 JSONL，并在汇总中计入 `failures`，不会静默丢弃。可通过 `--request-retries`、`--sample-retries` 和 `--retry-backoff` 调整。
 
 `results` 中的 `status=summary` 行含 Accuracy、Macro-F1 和 `F_avg`（Favor/Against 两类 F1 的平均）。API 错误只记录类型和 HTTP 状态，不会把密钥写入结果。

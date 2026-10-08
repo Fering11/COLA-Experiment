@@ -32,7 +32,14 @@ class COLAPipeline:
         self.client = client
         self.domain_role = domain_role
     
-    def predict(self, *, text: str, target: str,id:str, printFunc:Callable|None) -> PredictionResult:
+    def predict(
+        self,
+        *,
+        text: str,
+        target: str,
+        id: str = "",
+        printFunc: Callable | None = None,
+    ) -> PredictionResult:
         if not text.strip():
             raise ValueError("text must not be empty")
         if not target.strip():
@@ -73,7 +80,7 @@ class COLAPipeline:
             label=label,
         )
         
-    def _pass(**kwargs):
+    def _pass(*args, **kwargs):
         pass
 
     def _linguistic_analysis(self, text: str) -> str:
