@@ -32,7 +32,7 @@ class COLAPipeline:
         self.client = client
         self.domain_role = domain_role
     
-    def predict(self, *, text: str, target: str,printFunc:Callable|None) -> PredictionResult:
+    def predict(self, *, text: str, target: str,id:str, printFunc:Callable|None) -> PredictionResult:
         if not text.strip():
             raise ValueError("text must not be empty")
         if not target.strip():
@@ -42,7 +42,7 @@ class COLAPipeline:
             printFunc = self._pass
         
         with ThreadPoolExecutor(max_workers=3) as pool:
-            printFunc("> analysing...")
+            printFunc(f"{id}> analysing...")
             analysis_futures = {
                 "linguistic": pool.submit(self._linguistic_analysis, text),
                 "domain": pool.submit(self._domain_analysis, text, target),
@@ -50,7 +50,7 @@ class COLAPipeline:
             }
             analyses = {name: future.result() for name, future in analysis_futures.items()}
             
-            printFunc("> debating...")
+            printFunc(f"{id}> debating...")
             debate_futures = {
                 stance: pool.submit(
                     self._debate,

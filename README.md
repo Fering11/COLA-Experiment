@@ -10,6 +10,9 @@
 - `run.py`：唯一实验入口。
 - `results/`：运行后保存逐样本记录和汇总；每行立即落盘。
 - `docs/experiment-protocol.md`：复现范围、协议差异和数据边界。
+- `docs/dataset-sources.md`：SEM16、VAST、P-Stance 下载来源与许可边界。
+- `scripts/download_datasets.ps1`：下载 SEM16 训练集并抓取 VAST 项目快照。
+- `scripts/prepare_sem16.py`：把 SemEval 原始 TSV 转换为可直接评估的 CSV。
 
 正式 SEM16 测试集和作者使用的 GPT-3.5 Turbo 快照不在本目录中，所以当前环境不能声称复现论文表格结果。
 
