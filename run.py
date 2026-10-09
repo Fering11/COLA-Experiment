@@ -16,7 +16,7 @@ from cola.pipeline import COLAPipeline, parse_judge_option
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CSV = ROOT / "data" / "sem16_train.csv"
-DEFAULT_ENV_FILE = ROOT / ".dp.env" if (ROOT / ".dp.env").is_file() else None
+DEFAULT_ENV_FILE = ROOT / ".hy3.env"
 
 
 @dataclass(frozen=True)
@@ -27,10 +27,8 @@ class RunConfig:
     repeats: int
     workers: int
     sample_retries: int
-    request_retries: int
     retry_backoff: float
     mock: bool
-    model: str | None
     env_file: Path | None
     output: Path
     trace: bool
@@ -44,10 +42,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--repeats", type=int, default=1)
     p.add_argument("--workers", type=int, default=2, help="Maximum concurrent pipelines")
     p.add_argument("--sample-retries", type=int, default=1, help="Retries for transient failures of a complete sample")
-    p.add_argument("--request-retries", type=int, default=2, help="Retries for transient API request failures")
     p.add_argument("--retry-backoff", type=float, default=1.0, help="Maximum base delay for request retries")
     p.add_argument("--mock", action="store_true", help="Use deterministic offline fixture")
-    p.add_argument("--model")
     p.add_argument(
         "--env-file",
         type=Path,
@@ -96,12 +92,7 @@ class ProgressReporter:
 def make_client(config: RunConfig):
     if config.mock:
         return DeterministicMockClient()
-    return OpenAIChatClient(
-        model=config.model,
-        env_file=config.env_file,
-        max_retries=config.request_retries,
-        retry_backoff_seconds=config.retry_backoff,
-    )
+    return OpenAIChatClient(env_file=config.env_file)
 
 
 def run_direct(sample, client):
@@ -129,7 +120,6 @@ def _run_one(sample, method: str, repeat: int, config: RunConfig, client) -> dic
                     text=sample.text,
                     target=sample.target,
                     id=str(sample.sample_id),
-                    printFunc=lambda *args, **kwargs: None,
                 )
                 prediction = result.label
                 if config.trace:
@@ -184,10 +174,8 @@ def run(
     repeats: int = 1,
     workers: int = 2,
     sample_retries: int = 1,
-    request_retries: int = 2,
     retry_backoff: float = 1.0,
     mock: bool = False,
-    model: str | None = None,
     env_file: str | Path | None = DEFAULT_ENV_FILE,
     output: str | Path = ROOT / "results" / "run.jsonl",
     trace: bool = False,
@@ -200,10 +188,8 @@ def run(
         repeats=repeats,
         workers=workers,
         sample_retries=sample_retries,
-        request_retries=request_retries,
         retry_backoff=retry_backoff,
         mock=mock,
-        model=model,
         env_file=Path(env_file) if env_file is not None else None,
         output=Path(output),
         trace=trace,
@@ -214,8 +200,8 @@ def run(
         raise ValueError("--repeats and --limit must be positive")
     if config.workers < 1:
         raise ValueError("--workers must be positive")
-    if config.sample_retries < 0 or config.request_retries < 0:
-        raise ValueError("retry counts must be non-negative")
+    if config.sample_retries < 0:
+        raise ValueError("sample_retries must be non-negative")
     if config.retry_backoff < 0:
         raise ValueError("--retry-backoff must be non-negative")
 
@@ -228,6 +214,7 @@ def run(
         for repeat in range(1, config.repeats + 1):
             for method in methods:
                 client = make_client(config)
+                print(f"Using model: {getattr(client, 'model', 'mock')}")
                 records: list[dict] = []
                 started = time.perf_counter()
                 progress = ProgressReporter(
@@ -270,16 +257,15 @@ def run(
     return 0
 
 
-# deepseek
-sem16_dataset = ROOT / "data" / "sem16_train.csv"
-print("Deepseek")
-run(csv=sem16_dataset,method="cola",trace=True,output=ROOT/"results"/"sem16"/"dpv4.jsonl",env_file=ROOT /".dp.env",limit=500)
-print("GLM 5.3 flash")
-run(csv=sem16_dataset,method="cola",trace=True,output=ROOT/"results"/"sem16"/"glm5.3.jsonl",env_file=ROOT /".glm5.3.env",limit=500)
-print("HY4")
-run(csv=sem16_dataset,method="cola",trace=True,output=ROOT/"results"/"sem16"/"hy4.jsonl",env_file=ROOT /".hy4.env")
-print("HY3")
-run(csv=sem16_dataset,method="cola",trace=True,output=ROOT/"results"/"sem16"/"hy3.jsonl",env_file=ROOT /".hy3.env")
+def run_model_suite() -> None:
+    """Run the four explicitly configured provider files while preserving labels."""
+    sem16_dataset = ROOT / "data" / "sem16_train.csv"
+    run(csv=sem16_dataset, method="cola", trace=True, output=ROOT / "results" / "sem16" / "dpv4.jsonl", env_file=ROOT / ".dp.env", limit=1)
+    run(csv=sem16_dataset, method="cola", trace=True, output=ROOT / "results" / "sem16" / "glm5.3.jsonl", env_file=ROOT / ".glm5.3.env", limit=1)
+    run(csv=sem16_dataset, method="cola", trace=True, output=ROOT / "results" / "sem16" / "hy4.jsonl", env_file=ROOT / ".hy4.env", limit=1)
+    run(csv=sem16_dataset, method="cola", trace=True, output=ROOT / "results" / "sem16" / "hy3.jsonl", env_file=ROOT / ".hy3.env", limit=1)
+
+run_model_suite()
 
 if __name__ == "__main__" and 0:
     try:
@@ -292,10 +278,8 @@ if __name__ == "__main__" and 0:
                 repeats=cli.repeats,
                 workers=cli.workers,
                 sample_retries=cli.sample_retries,
-                request_retries=cli.request_retries,
                 retry_backoff=cli.retry_backoff,
                 mock=cli.mock,
-                model=cli.model,
                 env_file=cli.env_file,
                 output=cli.output,
                 trace=cli.trace,

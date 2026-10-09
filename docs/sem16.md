@@ -23,7 +23,7 @@
 先用一条真实样本检查接口：
 
 ```powershell
-.\.venv\Scripts\python.exe run.py --method cola --csv data\sem16_train.csv --limit 1 --env-file .dp.env --trace --output results\sem16-first1.jsonl
+.\.venv\Scripts\python.exe run.py --method cola --csv data\sem16_train.csv --limit 1 --env-file .hy3.env --trace --output results\sem16-first1.jsonl
 ```
 
 接口正常后再扩大范围。完整 COLA 每条样本需要 7 次模型请求；`--mock` 只检查流程，不产生有效模型结果。运行器默认使用 `data/sem16_train.csv`、2 个外层 worker，并显示完成进度；请求遇到瞬时网络错误会退避重试，最终失败的样本仍会写入结果。

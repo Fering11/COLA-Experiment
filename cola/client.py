@@ -1,11 +1,90 @@
 from __future__ import annotations
 
-import os
 import random
 import time
 from pathlib import Path
 from threading import Lock
+from dataclasses import dataclass
 from typing import Protocol
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    api_key: str
+    model: str
+    base_url: str
+    timeout_seconds: float = 60.0
+    max_retries: int = 0
+    max_completion_tokens: int | None = None
+    reasoning_effort: str | None = None
+    retry_backoff_seconds: float = 1.0
+
+
+def load_provider_config(env_file: str | Path) -> ProviderConfig:
+    """Read provider settings from an explicit env file, never from process env."""
+    path = Path(env_file)
+    if not path.is_file():
+        raise FileNotFoundError(f"Provider config file does not exist: {path}")
+
+    values: dict[str, str] = {}
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not key.replace("_", "").isalnum():
+            raise ValueError(f"Invalid provider config at {path}:{line_number}")
+        values[key] = _strip_quotes(value.strip())
+
+    def required(key: str) -> str:
+        value = values.get(key, "").strip()
+        if not value:
+            raise ValueError(f"Missing {key} in provider config: {path}")
+        return value
+
+    return ProviderConfig(
+        api_key=required("OPENAI_API_KEY"),
+        model=required("OPENAI_MODEL"),
+        base_url=required("OPENAI_BASE_URL"),
+        timeout_seconds=_float_value(values, "OPENAI_TIMEOUT_SECONDS", 60.0),
+        max_retries=_nonnegative_int(values, "OPENAI_MAX_RETRIES", 0),
+        max_completion_tokens=_optional_positive_int(values, "OPENAI_MAX_COMPLETION_TOKENS"),
+        reasoning_effort=values.get("OPENAI_REASONING_EFFORT") or None,
+        retry_backoff_seconds=_float_value(values, "OPENAI_RETRY_BACKOFF_SECONDS", 1.0),
+    )
+
+
+def _strip_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def _float_value(values: dict[str, str], key: str, default: float) -> float:
+    value = values.get(key, "").strip()
+    parsed = default if not value else float(value)
+    if parsed < 0:
+        raise ValueError(f"{key} must be non-negative")
+    return parsed
+
+
+def _nonnegative_int(values: dict[str, str], key: str, default: int) -> int:
+    value = values.get(key, "").strip()
+    parsed = default if not value else int(value)
+    if parsed < 0:
+        raise ValueError(f"{key} must be non-negative")
+    return parsed
+
+
+def _optional_positive_int(values: dict[str, str], key: str) -> int | None:
+    value = values.get(key, "").strip()
+    if not value:
+        return None
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{key} must be positive")
+    return parsed
 
 
 class LLMClient(Protocol):
@@ -19,20 +98,9 @@ class OpenAIChatClient:
     def __init__(
         self,
         *,
-        model: str | None = None,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        timeout: float | None = None,
-        env_file: str | Path | None = None,
-        max_retries: int | None = None,
-        retry_backoff_seconds: float | None = None,
+        env_file: str | Path,
     ) -> None:
-        _load_local_dotenv(env_file)
-        key = api_key or os.getenv("OPENAI_API_KEY")
-        if not key:
-            raise RuntimeError(
-                "OPENAI_API_KEY is not set. Use --mock for an offline run."
-            )
+        config = load_provider_config(env_file)
 
         try:
             from openai import OpenAI
@@ -42,45 +110,30 @@ class OpenAIChatClient:
                 "python -m pip install -r requirements.txt"
             ) from exc
 
-        self.model = model or os.getenv("OPENAI_MODEL", "qwen-plus")
-        endpoint = base_url or os.getenv("OPENAI_BASE_URL") or None
-        self._is_dashscope = bool(endpoint and ("dashscope" in endpoint or "maas.aliyuncs.com" in endpoint))
-        timeout_value = timeout
-        if timeout_value is None:
-            timeout_value = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "60"))
-        self.reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT") or None
-        self.max_completion_tokens = _optional_int("OPENAI_MAX_COMPLETION_TOKENS")
-        configured_retries = int(os.getenv("OPENAI_MAX_RETRIES", "0"))
-        self.max_retries = configured_retries if max_retries is None else max_retries
-        # The runner supplies its own retry loop; avoid silently multiplying retries.
-        sdk_max_retries = configured_retries if max_retries is None else 0
-        if self.max_retries < 0:
-            raise ValueError("max_retries must be non-negative")
-        self.retry_backoff_seconds = (
-            float(os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", "1.0"))
-            if retry_backoff_seconds is None
-            else retry_backoff_seconds
-        )
-        if self.retry_backoff_seconds < 0:
-            raise ValueError("retry_backoff_seconds must be non-negative")
+        self.config = config
+        self.model = config.model
+        self._is_dashscope = "dashscope" in config.base_url or "maas.aliyuncs.com" in config.base_url
+        self.max_retries = config.max_retries
+        self.retry_backoff_seconds = config.retry_backoff_seconds
         self.calls: list[dict] = []
         self._lock = Lock()
         self._client = OpenAI(
-            api_key=key,
-            base_url=endpoint,
-            timeout=timeout_value,
-            max_retries=sdk_max_retries,
+            api_key=config.api_key,
+            base_url=config.base_url,
+            timeout=config.timeout_seconds,
+            # Retries are performed here so each attempt is recorded exactly once.
+            max_retries=0,
         )
         self.settings = {
             "model": self.model,
-            "base_url": str(self._client.base_url),
+            "base_url": config.base_url,
             "temperature": 0,
-            "timeout_seconds": timeout_value,
+            "timeout_seconds": config.timeout_seconds,
             "max_retries": self.max_retries,
-            "sdk_max_retries": sdk_max_retries,
+            "sdk_max_retries": 0,
             "retry_backoff_seconds": self.retry_backoff_seconds,
-            "reasoning_effort": self.reasoning_effort,
-            "max_completion_tokens": self.max_completion_tokens,
+            "reasoning_effort": config.reasoning_effort,
+            "max_completion_tokens": config.max_completion_tokens,
         }
 
     def complete(self, *, system: str, user: str) -> str:
@@ -92,11 +145,11 @@ class OpenAIChatClient:
                 {"role": "user", "content": user},
             ],
         }
-        if self.reasoning_effort:
-            request["reasoning_effort"] = self.reasoning_effort
-        if self.max_completion_tokens is not None:
+        if self.config.reasoning_effort:
+            request["reasoning_effort"] = self.config.reasoning_effort
+        if self.config.max_completion_tokens is not None:
             token_key = "max_tokens" if self._is_dashscope else "max_completion_tokens"
-            request[token_key] = self.max_completion_tokens
+            request[token_key] = self.config.max_completion_tokens
         started = time.perf_counter()
         record = {"system": system, "user": user, "attempts": 0}
         try:
@@ -146,55 +199,6 @@ def is_retryable_error(exc: BaseException) -> bool:
         "ReadTimeout",
         "TimeoutError",
     }
-
-
-def _optional_int(name: str) -> int | None:
-    value = os.getenv(name)
-    if value is None or not value.strip():
-        return None
-    parsed = int(value)
-    if parsed < 1:
-        raise ValueError(f"{name} must be a positive integer")
-    return parsed
-
-
-def _load_local_dotenv(env_file: str | Path | None = None) -> None:
-    """Load an explicit or nearby env file without overriding exported variables."""
-    if env_file:
-        candidates = [Path(env_file)]
-    elif os.getenv("COLA_ENV_FILE"):
-        candidates = [Path(os.environ["COLA_ENV_FILE"])]
-    else:
-        candidates = [Path.cwd() / ".env", Path(__file__).resolve().parents[1] / ".env"]
-    path = next((candidate for candidate in candidates if candidate.is_file()), None)
-    if path is None:
-        if env_file or os.getenv("COLA_ENV_FILE"):
-            raise FileNotFoundError("The specified env file does not exist.")
-        return
-
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        _load_simple_dotenv(path)
-    else:
-        load_dotenv(path, override=False)
-
-
-def _load_simple_dotenv(path: Path) -> None:
-    """Small fallback for the KEY=value files used by this project."""
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        key, separator, value = line.partition("=")
-        if not separator or not key.isidentifier() or key in os.environ:
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        os.environ[key] = value
 
 
 class DeterministicMockClient:

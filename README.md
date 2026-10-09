@@ -44,7 +44,7 @@
 .\.venv\Scripts\python.exe run.py --mock --method cola --csv data\dev15.csv --output results\dev15-mock.jsonl
 ```
 
-代码中直接调用：
+代码中直接调用。默认读取项目根目录的 `.hy3.env`；API key、模型名、地址、超时和重试参数全部从这个文件读取，代码不读取进程环境变量：
 
 ```python
 from run import run
@@ -53,27 +53,25 @@ run(
     csv="data/sem16_train.csv",
     method="cola",
     workers=2,
-    env_file=".dp.env",
     output="results/sem16.jsonl",
 )
 ```
 
 ## 接入 Qwen 或其他提供商
 
-复制 `configs/qwen.env.example` 为本地配置，填写 API key。也可以直接复用上级研究目录中已有的 `qwen.env`（不会复制或显示其中的密钥）：
+复制 `configs/qwen.env.example` 为本地配置，填写 API key；或者显式传入其他 provider env 文件。默认模型是 `.hy3.env` 中配置的 HY3：
 
 ```powershell
 .\.venv\Scripts\python.exe run.py `
   --method cola `
   --csv data\dev15.csv `
-  --env-file ..\COLA-Research\qwen.env `
-  --model qwen-plus `
+  --env-file .hy3.env `
   --repeats 1 `
   --trace `
   --output results\qwen-dev15.jsonl
 ```
 
-切换提供商只需替换 `OPENAI_BASE_URL`、`OPENAI_MODEL` 和 key；客户端仍使用同一套接口。`--trace` 会保存提示词和模型原文，含真实文本时应按数据许可保存。
+切换提供商只需替换 env 文件路径；客户端从该文件读取 `OPENAI_BASE_URL`、`OPENAI_MODEL`、API key 和其他参数。`--trace` 会保存提示词和模型原文，含真实文本时应按数据许可保存。
 
 ## 真实实验建议
 

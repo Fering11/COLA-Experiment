@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import run
-from cola.client import OpenAIChatClient
+from cola.client import OpenAIChatClient, ProviderConfig, load_provider_config
 from cola.data import StanceSample
 
 
@@ -45,8 +45,30 @@ class _FlakyCompletions:
 
 
 class RunTests(unittest.TestCase):
+    def test_provider_settings_are_read_from_explicit_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "provider.env"
+            env_file.write_text(
+                "OPENAI_API_KEY='key'\n"
+                "OPENAI_MODEL=hy3\n"
+                "OPENAI_BASE_URL=http://localhost/v1\n"
+                "OPENAI_MAX_RETRIES=4\n",
+                encoding="utf-8",
+            )
+            config = load_provider_config(env_file)
+            self.assertEqual(config.api_key, "key")
+            self.assertEqual(config.model, "hy3")
+            self.assertEqual(config.max_retries, 4)
+
     def test_request_retry_records_attempt_count(self):
         client = OpenAIChatClient.__new__(OpenAIChatClient)
+        client.config = ProviderConfig(
+            api_key="test-key",
+            model="test-model",
+            base_url="https://example.test/v1",
+            max_retries=1,
+            retry_backoff_seconds=0,
+        )
         client.model = "test-model"
         client._is_dashscope = False
         client.reasoning_effort = None
@@ -83,7 +105,6 @@ class RunTests(unittest.TestCase):
                 limit=1,
                 workers=1,
                 sample_retries=0,
-                request_retries=0,
                 retry_backoff=0,
                 csv=Path("data/smoke.csv"),
                 output=output,
@@ -102,10 +123,8 @@ class RunTests(unittest.TestCase):
                         repeats=args.repeats,
                         workers=args.workers,
                         sample_retries=args.sample_retries,
-                        request_retries=args.request_retries,
                         retry_backoff=args.retry_backoff,
                         mock=args.mock,
-                        model=args.model,
                         env_file=args.env_file,
                         output=args.output,
                         trace=args.trace,
