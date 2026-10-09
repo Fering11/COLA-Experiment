@@ -166,6 +166,44 @@ def _write_summary(handle, records: list[dict], method: str, repeat: int, starte
     print(json.dumps(summary, ensure_ascii=False))
 
 
+def _run_judge_one(sample, method: str, repeat: int, config: RunConfig, client) -> dict:
+    """Run one sample with a single final judge request for ablation runs."""
+    item = {
+        "status": "ok",
+        "method": method,
+        "repeat": repeat,
+        "id": sample.sample_id,
+        "gold": sample.label,
+        "attempts": 0,
+    }
+    for attempt in range(config.sample_retries + 1):
+        item["attempts"] = attempt + 1
+        try:
+            raw = COLAPipeline(client).only_judge(
+                text=sample.text,
+                target=sample.target,
+            )
+            prediction = parse_judge_option(raw)
+            item["status"] = "ok"
+            item.pop("error_type", None)
+            item.pop("retryable", None)
+            if config.trace:
+                item["trace"] = {"raw": raw}
+            item["prediction"] = prediction
+            return item
+        except Exception as exc:
+            retryable = is_retryable_error(exc)
+            item.update(
+                status="error",
+                error_type=type(exc).__name__,
+                retryable=retryable,
+            )
+            if attempt >= config.sample_retries or not retryable:
+                return item
+            time.sleep(min(config.retry_backoff * (2 ** attempt), 30.0))
+    return item
+
+
 def run(
     *,
     csv: str | Path = DEFAULT_CSV,
@@ -179,6 +217,7 @@ def run(
     env_file: str | Path | None = DEFAULT_ENV_FILE,
     output: str | Path = ROOT / "results" / "run.jsonl",
     trace: bool = False,
+    sample_runner=None,
 ) -> int:
     """Run independent samples concurrently with explicit, reusable parameters."""
     config = RunConfig(
@@ -209,6 +248,7 @@ def run(
     config.output.parent.mkdir(parents=True, exist_ok=True)
     methods = ("cola", "direct") if config.method == "both" else (config.method,)
     worker_count = min(config.workers, len(samples))
+    worker = sample_runner or _run_one
 
     with config.output.open("w", encoding="utf-8", newline="\n") as handle:
         for repeat in range(1, config.repeats + 1):
@@ -225,7 +265,7 @@ def run(
                 interrupted = False
                 try:
                     futures = [
-                        executor.submit(_run_one, sample, method, repeat, config, client)
+                        executor.submit(worker, sample, method, repeat, config, client)
                         for sample in samples
                     ]
                     for future in as_completed(futures):
@@ -259,11 +299,27 @@ def run(
 
 def run_model_suite() -> None:
     """Run the four explicitly configured provider files while preserving labels."""
-    sem16_dataset = ROOT / "data" / "sem16_train.csv"
-    run(csv=sem16_dataset, method="cola", trace=True, output=ROOT / "results" / "sem16" / "dpv4.jsonl", env_file=ROOT / ".dp.env", limit=1)
-    run(csv=sem16_dataset, method="cola", trace=True, output=ROOT / "results" / "sem16" / "glm5.3.jsonl", env_file=ROOT / ".glm5.3.env", limit=1)
-    run(csv=sem16_dataset, method="cola", trace=True, output=ROOT / "results" / "sem16" / "hy4.jsonl", env_file=ROOT / ".hy4.env", limit=1)
-    run(csv=sem16_dataset, method="cola", trace=True, output=ROOT / "results" / "sem16" / "hy3.jsonl", env_file=ROOT / ".hy3.env", limit=1)
+    sem16_dataset = ROOT / "data" / "sem16_rand.csv"
+    result_dir = ROOT / "results" / "sem16_only_judge"
+    #run(csv=sem16_dataset, method="cola", trace=True, output=ROOT / "results" / "sem16" / "dpv4.jsonl", env_file=ROOT / ".dp.env", limit=1)
+    dataset_limit = 1
+    runner = _run_judge_one
+
+    run(csv=sem16_dataset, method="cola",sample_runner = runner,limit=dataset_limit, trace=True, 
+    output=result_dir / "dpv4.jsonl", env_file=ROOT / ".dp.env")
+    
+    run(csv=sem16_dataset, method="cola",sample_runner = runner,limit=dataset_limit, trace=True, 
+    output=result_dir / "glm5.3.jsonl", env_file=ROOT / ".glm5.3.env")
+    
+    # Hy4 抽风了，太慢了
+    """  
+    run(csv=sem16_dataset, method="cola",sample_runner = runner,limit=dataset_limit, trace=True, 
+    output=result_dir / "hy4.jsonl", env_file=ROOT / ".hy4.env")
+    """
+    
+    run(csv=sem16_dataset, method="cola",sample_runner = runner,limit=dataset_limit, trace=True, 
+    output=result_dir / "hy3.jsonl", env_file=ROOT / ".hy3.env")
+
 
 run_model_suite()
 

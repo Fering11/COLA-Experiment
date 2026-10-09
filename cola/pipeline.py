@@ -148,7 +148,18 @@ class COLAPipeline:
             "and nothing else."
         )
         return self.client.complete(system=system, user=user)
-
+    # 我们修改了部分提示词
+    def only_judge(self,*,text:str,target:str) -> str:
+        system = "You are the stance judge."
+        user = (
+            f"Determine whether the sentence is in favor of or against {target}, "
+            f"or is neutral. Sentence: {text}\n"
+            "You need to judge for yourself what the stance of the text is.\n"
+            "Choose from: A: Against B: Favor C: Neutral\n"
+            "Constraint: Answer with only the option above that is most accurate "
+            "and nothing else."
+        )
+        return self.client.complete(system=system, user=user)
 
 def parse_judge_option(raw: str) -> str:
     match = re.fullmatch(r"([ABC])(?:\s*:\s*(Against|Favor|Neutral))?[.!]?", raw.strip(), re.I)
